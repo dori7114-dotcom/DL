@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>단서 공유 교실 · 교사용</title>
+<style>
+:root{--bg:#f5f7fb;--text:#1f2937;--muted:#6b7280;--line:#e5e7eb;--blue:#2563eb;--blue2:#eff6ff;--green:#059669;--green2:#ecfdf5;--red:#dc2626}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:"Pretendard","Noto Sans KR","Apple SD Gothic Neo",sans-serif}button,input{font:inherit}.hidden{display:none!important}.wrap{max-width:900px;margin:auto;padding:40px 16px 70px}.hero{text-align:center;margin-bottom:22px}.tag{display:inline-block;background:var(--blue2);color:var(--blue);padding:6px 10px;border-radius:999px;font-size:12px;font-weight:900}.hero h1{margin:8px 0}.hero p{color:var(--muted)}
+.card,.bar{background:white;border:1px solid var(--line);border-radius:18px;padding:22px;margin-bottom:18px;box-shadow:0 8px 28px rgba(15,23,42,.05)}.field{display:flex;flex-direction:column;gap:7px;margin-bottom:12px}label{font-weight:850;font-size:14px}input{border:1px solid #d8dee8;border-radius:11px;padding:11px}.primary{width:100%;border:0;border-radius:11px;padding:12px;background:var(--blue);color:white;font-weight:900}.msg{min-height:18px;font-size:13px;white-space:pre-wrap}.err{color:var(--red);font-weight:800}.ok{color:var(--green);font-weight:800}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:10px}.bar b{display:block}.bar small{color:var(--muted)}.chip{font-size:12px;font-weight:850;background:#f1f5f9;color:#475569;padding:7px 10px;border-radius:999px}.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}.actions button{border:0;border-radius:11px;padding:12px;font-weight:900}.lock{background:var(--blue2);color:var(--blue)}.open{background:var(--green2);color:var(--green)}.secondary{border:1px solid var(--line);background:white;color:#475569;border-radius:9px;padding:7px 9px;font-weight:800}
+.group{border:1px solid var(--line);border-radius:14px;overflow:hidden;margin-top:12px}.gh{display:flex;justify-content:space-between;background:#f8fafc;padding:11px 13px;font-weight:900}.gb{padding:10px}.clue{border:1px solid var(--line);border-radius:10px;padding:10px;margin-top:8px;white-space:pre-wrap;line-height:1.6}.danger{width:100%;border:1px solid #fecaca;background:white;color:var(--red);border-radius:11px;padding:11px;font-weight:850}
+@media(max-width:650px){.actions{grid-template-columns:1fr}.bar{align-items:flex-start;flex-direction:column}}
+</style></head>
+<body><div class="wrap">
+<header class="hero"><div class="tag">교사용</div><h1>단서 공유 교실 관리</h1><p>이메일/비밀번호 교사 계정만 공개 설정을 변경할 수 있습니다.</p></header>
+
+<section id="loginCard" class="card"><h2>교사 로그인</h2><form id="loginForm"><div class="field"><label>이메일</label><input id="email" type="email" required></div><div class="field"><label>비밀번호</label><input id="password" type="password" required></div><button class="primary">로그인</button><p id="loginMsg" class="msg"></p></form></section>
+
+<div id="teacherApp" class="hidden">
+<section class="bar"><div><b id="modeTitle">상태 확인 중</b><small id="modeDesc"></small></div><div><span class="chip" id="classChip"></span> <button id="logout" class="secondary">로그아웃</button></div></section>
+<section class="card"><h2>공개 설정</h2><div class="actions"><button id="lockBtn" class="lock">🔒 다른 모둠 가리기</button><button id="openBtn" class="open">🔓 모든 모둠 공개</button></div><p id="msg" class="msg"></p></section>
+<section class="card"><h2>전체 단서</h2><div id="groups">아직 단서가 없습니다.</div></section>
+<section class="card"><h2>현재 반 초기화</h2><button id="resetBtn" class="danger">현재 반 데이터 전체 삭제</button></section>
+</div>
+</div>
+
+<script type="module">
+import { firebaseConfig } from "./firebase-config.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import { getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import { getFirestore,doc,setDoc,collection,getDocs,onSnapshot,serverTimestamp,writeBatch } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+const $=s=>document.querySelector(s);
+const CLASS_NUM=(new URLSearchParams(location.search).get("class")||"1").match(/\d+/)?.[0]||"1";
+const CLASS_ID="class-"+String(parseInt(CLASS_NUM,10)).padStart(2,"0");
+$("#classChip").textContent=`${parseInt(CLASS_NUM,10)}반`;
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
+
+const app=initializeApp(firebaseConfig),auth=getAuth(app),db=getFirestore(app);
+let groupUnsub=null,clueUnsubs=[];
+
+function clearSubs(){groupUnsub?.();groupUnsub=null;clueUnsubs.forEach(fn=>fn());clueUnsubs=[]}
+
+function isPasswordUser(u){return !!u && u.providerData.some(p=>p.providerId==="password")}
+
+onAuthStateChanged(auth,async u=>{
+  if(u&&isPasswordUser(u)){
+    $("#loginCard").classList.add("hidden");$("#teacherApp").classList.remove("hidden");start();
+  }else{
+    clearSubs();$("#teacherApp").classList.add("hidden");$("#loginCard").classList.remove("hidden");
+    if(u) await signOut(auth);
+  }
+});
+
+$("#loginForm").onsubmit=async e=>{
+  e.preventDefault();
+  try{await signInWithEmailAndPassword(auth,$("#email").value.trim(),$("#password").value)}
+  catch(err){$("#loginMsg").textContent=`로그인 실패: ${err.code}`;$("#loginMsg").className="msg err"}
+};
+$("#logout").onclick=()=>signOut(auth);
+
+function start(){
+  onSnapshot(doc(db,"classes",CLASS_ID,"settings","public"),s=>{
+    const open=s.exists()&&s.data().revealAll===true;
+    $("#modeTitle").textContent=open?"현재: 전체 공개":"현재: 다른 모둠 잠금";
+    $("#modeDesc").textContent=open?"모든 학생이 다른 모둠 단서를 볼 수 있습니다.":"학생은 자기 모둠 단서만 볼 수 있습니다.";
+  });
+
+  clearSubs();
+  groupUnsub=onSnapshot(collection(db,"classes",CLASS_ID,"groups"),gs=>{
+    clueUnsubs.forEach(fn=>fn());clueUnsubs=[];
+    const groups=gs.docs.map(d=>({id:d.id,...d.data()}));
+    $("#groups").innerHTML=groups.length?groups.map(g=>`<section class="group" id="g_${g.id}"><div class="gh"><span>${esc(g.groupLabel)}</span><span class="cnt"></span></div><div class="gb">불러오는 중...</div></section>`).join(""):"아직 단서가 없습니다.";
+    groups.forEach(g=>{
+      const u=onSnapshot(collection(db,"classes",CLASS_ID,"groups",g.id,"clues"),cs=>{
+        const box=document.querySelector(`#g_${CSS.escape(g.id)} .gb`);
+        const cnt=document.querySelector(`#g_${CSS.escape(g.id)} .cnt`);
+        if(!box)return;
+        const items=cs.docs.map(d=>d.data());
+        cnt.textContent=`${items.length}개`;
+        box.innerHTML=items.map(x=>`<div class="clue">${esc(x.clueText)}</div>`).join("")||"단서가 없습니다.";
+      });
+      clueUnsubs.push(u);
+    });
+  },err=>{$("#msg").textContent=`전체 단서 불러오기 실패: ${err.code}`;$("#msg").className="msg err"});
+}
+
+async function setReveal(v){
+  try{
+    await setDoc(doc(db,"classes",CLASS_ID,"settings","public"),{revealAll:v,updatedAt:serverTimestamp()},{merge:true});
+    $("#msg").textContent=v?"모든 모둠을 공개했습니다.":"다시 가렸습니다.";$("#msg").className="msg ok";
+  }catch(err){$("#msg").textContent=`설정 실패: ${err.code} / ${err.message}`;$("#msg").className="msg err"}
+}
+$("#lockBtn").onclick=()=>setReveal(false);$("#openBtn").onclick=()=>setReveal(true);
+
+async function deleteCollection(colRef){
+  const snap=await getDocs(colRef);
+  for(let i=0;i<snap.docs.length;i+=400){
+    const b=writeBatch(db);snap.docs.slice(i,i+400).forEach(d=>b.delete(d.ref));await b.commit();
+  }
+}
+$("#resetBtn").onclick=async()=>{
+  if(prompt("현재 반 데이터를 삭제합니다. 계속하려면 '삭제' 입력")!=="삭제")return;
+  try{
+    const gs=await getDocs(collection(db,"classes",CLASS_ID,"groups"));
+    for(const g of gs.docs){
+      await deleteCollection(collection(db,"classes",CLASS_ID,"groups",g.id,"clues"));
+    }
+    await deleteCollection(collection(db,"classes",CLASS_ID,"groups"));
+    await deleteCollection(collection(db,"classes",CLASS_ID,"members"));
+    await setDoc(doc(db,"classes",CLASS_ID,"settings","public"),{revealAll:false,updatedAt:serverTimestamp()},{merge:true});
+    $("#msg").textContent="현재 반을 초기화했습니다.";$("#msg").className="msg ok";
+  }catch(err){$("#msg").textContent=`초기화 실패: ${err.code} / ${err.message}`;$("#msg").className="msg err"}
+};
+</script></body></html>
