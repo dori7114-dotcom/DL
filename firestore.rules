@@ -1,0 +1,113 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAnonymousStudent() {
+      return signedIn()
+        && request.auth.token.firebase.sign_in_provider == "anonymous";
+    }
+
+    function isTeacher() {
+      return signedIn()
+        && request.auth.token.firebase.sign_in_provider == "password";
+    }
+
+    function memberPath(classId, uid) {
+      return /databases/$(database)/documents/classes/$(classId)/members/$(uid);
+    }
+
+    function settingPath(classId) {
+      return /databases/$(database)/documents/classes/$(classId)/settings/public;
+    }
+
+    function hasMembership(classId) {
+      return isAnonymousStudent()
+        && exists(memberPath(classId, request.auth.uid));
+    }
+
+    function myGroupId(classId) {
+      return get(memberPath(classId, request.auth.uid)).data.groupId;
+    }
+
+    function isRevealed(classId) {
+      return exists(settingPath(classId))
+        && get(settingPath(classId)).data.revealAll == true;
+    }
+
+    // 전체 공개 여부
+    match /classes/{classId}/settings/{settingId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isTeacher();
+    }
+
+    // 익명 학생의 모둠 등록
+    match /classes/{classId}/members/{uid} {
+      allow read: if isTeacher()
+        || (signedIn() && request.auth.uid == uid);
+
+      allow create: if isAnonymousStudent()
+        && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly([
+          "ownerUid", "groupId", "groupLabel", "createdAt"
+        ])
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.groupId is string
+        && request.resource.data.groupId.size() > 0
+        && request.resource.data.groupId.size() <= 40
+        && request.resource.data.groupLabel is string
+        && request.resource.data.groupLabel.size() > 0
+        && request.resource.data.groupLabel.size() <= 30;
+
+      allow update: if false;
+      allow delete: if isTeacher();
+    }
+
+    // 학생 단서: 문서 ID가 학생의 익명 UID
+    match /classes/{classId}/clues/{uid} {
+
+      // 잠금 중에는 자기 모둠 단서만,
+      // 전체 공개 후에는 같은 반의 모든 단서를 읽을 수 있음
+      allow read: if isTeacher()
+        || isRevealed(classId)
+        || (
+          hasMembership(classId)
+          && resource.data.groupId == myGroupId(classId)
+        );
+
+      allow create: if isAnonymousStudent()
+        && request.auth.uid == uid
+        && hasMembership(classId)
+        && request.resource.data.keys().hasOnly([
+          "ownerUid", "groupId", "groupLabel",
+          "clueText", "createdAt", "updatedAt"
+        ])
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.groupId == myGroupId(classId)
+        && request.resource.data.groupLabel is string
+        && request.resource.data.groupLabel.size() > 0
+        && request.resource.data.groupLabel.size() <= 30
+        && request.resource.data.clueText is string
+        && request.resource.data.clueText.size() > 0
+        && request.resource.data.clueText.size() <= 600;
+
+      // 학생은 자기 단서 내용만 수정 가능
+      allow update: if isAnonymousStudent()
+        && request.auth.uid == uid
+        && resource.data.ownerUid == request.auth.uid
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.groupId == resource.data.groupId
+        && request.resource.data.groupLabel == resource.data.groupLabel
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.clueText is string
+        && request.resource.data.clueText.size() > 0
+        && request.resource.data.clueText.size() <= 600;
+
+      allow delete: if isTeacher();
+    }
+  }
+}
